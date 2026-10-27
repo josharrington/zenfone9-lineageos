@@ -135,9 +135,9 @@ The script:
 
 ### Finish Magisk setup
 
-After the phone boots, open the **Magisk** app. If it shows an “additional setup” or “environment
-fix” prompt, tap **OK / Install**, let it finish, and approve the reboot it asks for. Magisk is not
-fully usable until that step completes.
+After the phone boots, open the **Magisk** app, tap **Reinstall** on the Magisk card, and choose
+the **recommended** option. Let it finish and approve the reboot it asks for. Magisk is not fully
+usable until that step completes.
 
 If the app is not installed (for example, the phone was in the bootloader and had no adb), install
 it manually:

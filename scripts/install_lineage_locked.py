@@ -1285,14 +1285,16 @@ def root(ctx: Ctx) -> None:
             warn("could not reach the phone over adb to install the Magisk app")
 
     ok("root install finished.")
-    if app_installed:
-        say("   The Magisk app is installed. Open it and complete any additional")
-    else:
+    if not app_installed:
         say("   Install the Magisk app after boot:")
         say(f"     adb install -r {apk}")
         say(f"   or copy this APK to the phone and open it: {apk}")
-        say("   Then open Magisk and complete any additional")
-    say("   setup it asks for and approve the reboot it requests.")
+        say("")
+    say("   Then, in the Magisk app:")
+    say("     1. Open Magisk.")
+    say("     2. Tap Reinstall on the Magisk card.")
+    say("     3. Choose the recommended option.")
+    say("     4. Let it finish and reboot the phone when asked.")
     say("")
     say("   If Magisk reports that it is not installed, the patched boot image")
     say("   did not boot; check the active slot and rerun `root`.")
