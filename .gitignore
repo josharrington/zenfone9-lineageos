@@ -1,0 +1,15 @@
+# Device artifacts and identifiers — never commit
+docs/00-recon.md
+docs/evidence/
+dumps/
+backups/
+*.img
+*.bin
+payload.bin
+*.zip
+# Local install workspaces and private signing keys
+zf9/
+zf9-lineage/
+key.pem
+__pycache__/
+*.pyc
