@@ -992,8 +992,8 @@ def patch_boot(ctx: Ctx, src: Path, apk: Path, preinit: str) -> Path:
 
 def target_adb_serial(ctx: Ctx) -> str | None:
     devices = [s for s, state in ctx.adb_states() if state == "device"]
-    if ctx.serial and ctx.serial in devices:
-        return ctx.serial
+    if ctx.serial:
+        return ctx.serial if ctx.serial in devices else None
     if len(devices) == 1:
         return devices[0]
     if len(devices) > 1:
@@ -1005,7 +1005,10 @@ def wait_for_adb(ctx: Ctx, timeout: int) -> bool:
     deadline = time.time() + timeout
     while time.time() < deadline:
         devices = [s for s, state in ctx.adb_states() if state == "device"]
-        if ctx.serial in devices or len(devices) == 1:
+        if ctx.serial:
+            if ctx.serial in devices:
+                return True
+        elif len(devices) == 1:
             return True
         time.sleep(3)
     return False
