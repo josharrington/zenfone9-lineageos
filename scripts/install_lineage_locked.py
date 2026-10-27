@@ -1390,6 +1390,17 @@ def verify(ctx: Ctx) -> None:
         ]
         for k in keys:
             say(f"  {k} = {ctx.adb_getprop(k)}")
+        p = ctx.adb("shell", "pidof", "magiskd", check=False)
+        say(f"  magiskd = {(p.stdout or '').strip() or 'not running'}")
+        p = ctx.adb("shell", "pm", "list", "packages", MAGISK_PACKAGE, check=False)
+        if p.returncode != 0:
+            say("  magisk app = unknown (adb command failed)")
+        elif MAGISK_PACKAGE in (p.stdout or ""):
+            q = ctx.adb("shell", "dumpsys", "package", MAGISK_PACKAGE, check=False)
+            m = re.search(r"versionName=(\S+)", q.stdout or "")
+            say(f"  magisk app = {m.group(1) if m else 'installed'}")
+        else:
+            say("  magisk app = not installed")
         say("")
         warn("ro.boot.verifiedbootstate is SPOOFED to 'green' by LineageOS for")
         say("   SafetyNet. A non-spoofing recovery (TWRP) reports the real value.")
