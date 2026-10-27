@@ -25,6 +25,7 @@ loading a different operating system.
 
 - [Host setup](docs/setup.md)
 - [Script-assisted installation](docs/install-easy.md)
+- [Root with Magisk and unroot](docs/install-easy.md#root-with-magisk)
 - [Manual installation](docs/install-manual.md) — image-signing commands are incomplete
 - [How the installation works and tested evidence](docs/14-lineage-booted.md)
 

@@ -78,7 +78,7 @@ Run these commands from the repository root. The script downloads missing images
 ```bash
 python3 scripts/install_lineage_locked.py doctor
 python3 scripts/install_lineage_locked.py prepare
-# Put the phone in the bootloader (Volume Down + Power), then:
+# Connect the phone (USB debugging enabled), then:
 python3 scripts/install_lineage_locked.py install
 ```
 
@@ -99,3 +99,106 @@ If `fastboot reboot fastboot` does not reach fastbootd, the script pauses and as
 **Advanced → Reboot to fastbootd** (or **Enter fastboot**) in Lineage Recovery.
 
 After installation, follow the shared [first boot and verification instructions](15-install-guide.md#5-first-boot).
+
+## Root with Magisk
+
+The `root` command follows the [official Magisk installation flow](https://topjohnwu.github.io/Magisk/install.html)
+for a device with boot ramdisk: patch `boot.img`, flash the patched image, then install the Magisk
+app and complete its additional setup. It also re-signs the top-level `vbmeta` with your AVB key,
+because the bootloader stays locked. Verification stays enabled (`--flags 0`); only `boot_<slot>`
+and `vbmeta_<slot>` are rewritten, so userdata is kept.
+
+Requirements:
+
+- The original private key that matches `avb_custom_key` (`zf9/key.pem`, or `--key PATH`). The
+  command never generates a new key.
+- `images/lineage/boot.img` from the same Lineage build that is installed.
+- Magisk v27 or newer. By default `root` downloads the latest official APK to
+  `zf9/downloads/`; pass `--magisk-apk PATH` to use a specific APK instead.
+- LineageOS must be running with USB debugging enabled. Before patching anything, `root` checks the
+  running OS over adb and refuses to flash a phone that does not report LineageOS.
+
+Boot LineageOS, enable USB debugging, and connect the phone. The command verifies the running OS,
+then reboots the phone to the bootloader itself. It cannot verify a phone that is only in the
+bootloader or fastbootd:
+
+```bash
+python3 scripts/install_lineage_locked.py root
+```
+
+The script:
+
+1. Verifies that the running Android is LineageOS.
+2. Runs Magisk's own `boot_patch.sh` against this device's `boot.img` with the device's pre-init
+   partition.
+3. Computes a new AVB hash descriptor for the patched image and rebuilds `vbmeta_lineage`.
+4. Installs the Magisk app over adb when the phone is reachable and also copies the APK to
+   `/sdcard/Download/`.
+5. Flashes `boot_<slot>` and `vbmeta_<slot>` and reboots.
+
+### Finish Magisk setup
+
+After the phone boots, open the **Magisk** app, tap **Reinstall** on the Magisk card, and choose
+the **recommended** option. Let it finish and approve the reboot it asks for. Magisk is not fully
+usable until that step completes.
+
+If the app is not installed (for example, the phone was in the bootloader and had no adb), install
+it manually:
+
+```bash
+adb install -r zf9/downloads/Magisk-v31.1.apk
+```
+
+or copy that APK to the phone and open it from Files. The script also leaves a copy at
+`/sdcard/Download/` when adb was available.
+
+Check the Magisk home screen afterwards: it should show the installed version (for example
+`31.1`). If it still says “Not installed”, the patched boot image did not boot; check the active
+slot and rerun `root`.
+
+### Verify root
+
+Magisk's Home card should say **Installed**. To verify from another app, grant it superuser access
+and run its root check. On the tested phone, Root Checker reports root access while the bootloader
+stays locked and dm-verity stays enforcing:
+
+![Root Checker reporting Root Access Verified on a locked bootloader](images/root-checker.png)
+
+
+The script patches `boot.img` on the host with Magisk’s official `boot_patch.sh`, using this
+device’s own image and pre-init partition. Do not copy `boot_magisk.img` to another phone or reuse
+it after a ROM update. Also do not run the guide’s
+`fastboot flash vbmeta --disable-verity --disable-verification` step: this install relies on a
+locked bootloader with verification enabled, and the script re-signs `vbmeta` instead.
+
+To build the images without touching the phone:
+
+```bash
+python3 scripts/install_lineage_locked.py root --patch-only --magisk-apk Magisk-v31.1.apk
+```
+
+`--patch-only` does not contact the phone, so it skips the LineageOS check and cannot flash
+anything. The artifacts are `zf9/out/boot_magisk.img` and `zf9/out/vbmeta_lineage.img`. Use
+`--no-download` to stop instead of downloading missing images, or `--preinit-device PATH` if a
+future Magisk version needs a different pre-init partition (the default is
+`/dev/block/by-name/metadata`).
+
+Limitations:
+
+- Root is lost when a ROM image is reflashed or restored; run `root` again afterwards.
+- A wrong key in `avb_custom_key` makes the phone fail verification. Keep `key.pem` backed up.
+- Play Integrity and some banking or wallet apps may fail. The boot state is `yellow` with the
+  custom key, and Magisk itself is detectable.
+- If the phone does not boot after rooting, use `unroot` below.
+
+## Remove root
+
+Run this with the phone in LineageOS (USB debugging enabled), fastbootd, or the bootloader. The
+script moves it to the bootloader itself when it can:
+
+```bash
+python3 scripts/install_lineage_locked.py unroot
+```
+
+`unroot` flashes the original Lineage `boot` and a freshly signed `vbmeta`; it does not erase data.
+Magisk's `/data/adb` files remain but are inactive. A data wipe or `restore` removes them.
