@@ -153,6 +153,15 @@ Check the Magisk home screen afterwards: it should show the installed version (f
 `31.1`). If it still says “Not installed”, the patched boot image did not boot; check the active
 slot and rerun `root`.
 
+### Verify root
+
+Magisk's Home card should say **Installed**. To verify from another app, grant it superuser access
+and run its root check. On the tested phone, Root Checker reports root access while the bootloader
+stays locked and dm-verity stays enforcing:
+
+![Root Checker reporting Root Access Verified on a locked bootloader](images/root-checker.png)
+
+
 The script patches `boot.img` on the host with Magisk’s official `boot_patch.sh`, using this
 device’s own image and pre-init partition. Do not copy `boot_magisk.img` to another phone or reuse
 it after a ROM update. Also do not run the guide’s
