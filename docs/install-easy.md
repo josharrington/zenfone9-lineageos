@@ -102,9 +102,11 @@ After installation, follow the shared [first boot and verification instructions]
 
 ## Root with Magisk
 
-The `root` command patches the Lineage boot image with Magisk and re-signs the top-level `vbmeta`
-with your AVB key. Verification stays enabled (`--flags 0`) and the bootloader stays locked; only
-`boot_<slot>` and `vbmeta_<slot>` are rewritten, so userdata is kept.
+The `root` command follows the [official Magisk installation flow](https://topjohnwu.github.io/Magisk/install.html)
+for a device with boot ramdisk: patch `boot.img`, flash the patched image, then install the Magisk
+app and complete its additional setup. It also re-signs the top-level `vbmeta` with your AVB key,
+because the bootloader stays locked. Verification stays enabled (`--flags 0`); only `boot_<slot>`
+and `vbmeta_<slot>` are rewritten, so userdata is kept.
 
 Requirements:
 
@@ -122,9 +124,40 @@ Volume Down + Power, then run:
 python3 scripts/install_lineage_locked.py root
 ```
 
-The script patches `boot.img` with Magisk, computes a new AVB hash descriptor for the patched
-image, rebuilds `vbmeta_lineage`, checks that the patched image fits the `boot` partition, flashes
-both partitions, and reboots. Open the Magisk app after boot to finish setup.
+The script:
+
+1. Runs Magisk's own `boot_patch.sh` against this device's `boot.img` with the device's pre-init
+   partition.
+2. Computes a new AVB hash descriptor for the patched image and rebuilds `vbmeta_lineage`.
+3. Installs the Magisk app over adb when the phone is reachable and also copies the APK to
+   `/sdcard/Download/`.
+4. Flashes `boot_<slot>` and `vbmeta_<slot>` and reboots.
+
+### Finish Magisk setup
+
+After the phone boots, open the **Magisk** app. If it shows an “additional setup” or “environment
+fix” prompt, tap **OK / Install**, let it finish, and approve the reboot it asks for. Magisk is not
+fully usable until that step completes.
+
+If the app is not installed (for example, the phone was in the bootloader and had no adb), install
+it manually:
+
+```bash
+adb install -r zf9/downloads/Magisk-v31.1.apk
+```
+
+or copy that APK to the phone and open it from Files. The script also leaves a copy at
+`/sdcard/Download/` when adb was available.
+
+Check the Magisk home screen afterwards: it should show the installed version (for example
+`31.1`). If it still says “Not installed”, the patched boot image did not boot; check the active
+slot and rerun `root`.
+
+The script patches `boot.img` on the host with Magisk’s official `boot_patch.sh`, using this
+device’s own image and pre-init partition. Do not copy `boot_magisk.img` to another phone or reuse
+it after a ROM update. Also do not run the guide’s
+`fastboot flash vbmeta --disable-verity --disable-verification` step: this install relies on a
+locked bootloader with verification enabled, and the script re-signs `vbmeta` instead.
 
 To build the images without touching the phone:
 

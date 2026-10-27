@@ -103,6 +103,7 @@ ROM_SHA256 = "f466719609a6ad5e2db42e5e8e48a7f1b232a4348d883c31f93e21225c237bbc"
 MAGISK_API = "https://api.github.com/repos/topjohnwu/Magisk/releases/latest"
 MAGISK_MIN_CODE = 27000
 MAGISK_PREINIT_DEFAULT = "/dev/block/by-name/metadata"
+MAGISK_PACKAGE = "com.topjohnwu.magisk"
 
 C_RESET = "\033[0m"
 C_RED = "\033[31m"
@@ -989,6 +990,52 @@ def patch_boot(ctx: Ctx, src: Path, apk: Path, preinit: str) -> Path:
     return dst
 
 
+def target_adb_serial(ctx: Ctx) -> str | None:
+    devices = ctx.adb_devices()
+    if ctx.serial and ctx.serial in devices:
+        return ctx.serial
+    if len(devices) == 1:
+        return devices[0]
+    if len(devices) > 1:
+        warn("multiple adb devices; use --serial to choose the target")
+    return None
+
+
+def wait_for_adb(ctx: Ctx, timeout: int) -> bool:
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        devices = ctx.adb_devices()
+        if ctx.serial in devices or len(devices) == 1:
+            return True
+        time.sleep(3)
+    return False
+
+
+def install_magisk_app(ctx: Ctx, apk: Path, launch: bool = False) -> bool:
+    """Install the Magisk app the official guide asks for after flashing.
+
+    The patched ramdisk alone starts Magisk, but the app is the manager and it
+    performs the additional setup prompt on first launch.
+    """
+    serial = target_adb_serial(ctx)
+    if serial is None:
+        return False
+    ctx.serial = serial
+    remote = f"/sdcard/Download/{apk.name}"
+    info(f"installing the Magisk app on {ctx.serial}")
+    ctx.adb("push", str(apk), remote, check=False)
+    p = ctx.adb("install", "-r", str(apk), check=False)
+    if p.returncode != 0:
+        warn("adb could not install the Magisk app")
+        say(f"   The APK is at {remote} on the phone; install it from Files.")
+        return False
+    ok(f"Magisk app installed (APK also at {remote})")
+    if launch:
+        ctx.adb("shell", "monkey", "-p", MAGISK_PACKAGE, "-c",
+                "android.intent.category.LAUNCHER", "1", check=False)
+    return True
+
+
 # ---------------------------------------------------------------------------
 # device install
 # ---------------------------------------------------------------------------
@@ -1208,6 +1255,9 @@ def root(ctx: Ctx) -> None:
         say(f"   vbmeta: {art['vbmeta_lineage']}")
         return
 
+    # The official guide installs the Magisk app before flashing the image.
+    app_installed = install_magisk_app(ctx, apk)
+
     ensure_bootloader(ctx)
     slot = check_device(ctx)
     ctx.confirm(f"Flash the Magisk-patched boot image to slot {slot}? "
@@ -1219,8 +1269,30 @@ def root(ctx: Ctx) -> None:
     flash(ctx, f"vbmeta_{slot}", art["vbmeta_lineage"])
     ctx.fastboot("reboot", check=False)
     say("")
-    ok("root install finished. Open the Magisk app and let it finish setup.")
-    say("   When the UI is up:")
+    if not app_installed:
+        info("waiting up to 3 minutes for the phone to boot to install the Magisk app")
+        if wait_for_adb(ctx, 180):
+            app_installed = install_magisk_app(ctx, apk, launch=True)
+            p = ctx.adb("shell", "pidof", "magiskd", check=False)
+            if (p.stdout or "").strip():
+                ok("Magisk daemon is running")
+            else:
+                warn("Magisk daemon is not running; the patched boot may not be active")
+        else:
+            warn("could not reach the phone over adb to install the Magisk app")
+
+    ok("root install finished.")
+    if app_installed:
+        say("   The Magisk app is installed. Open it and complete any additional")
+    else:
+        say("   Install the Magisk app after boot:")
+        say(f"     adb install -r {apk}")
+        say(f"   or copy this APK to the phone and open it: {apk}")
+        say("   Then open Magisk and complete any additional")
+    say("   setup it asks for and approve the reboot it requests.")
+    say("")
+    say("   If Magisk reports that it is not installed, the patched boot image")
+    say("   did not boot; check the active slot and rerun `root`.")
     usb_debugging_hint()
     say("   If the phone does not boot, reach the bootloader with Vol Down + Power,")
     say("   then run `unroot`.")
