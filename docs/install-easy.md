@@ -115,10 +115,12 @@ Requirements:
 - `images/lineage/boot.img` from the same Lineage build that is installed.
 - Magisk v27 or newer. By default `root` downloads the latest official APK to
   `zf9/downloads/`; pass `--magisk-apk PATH` to use a specific APK instead.
+- LineageOS must be running with USB debugging enabled. Before patching anything, `root` checks the
+  running OS over adb and refuses to flash a phone that does not report LineageOS.
 
-Put the phone in the bootloader, or leave it in LineageOS with USB debugging enabled. The script
-reboots it to the bootloader itself when adb or fastbootd is reachable; otherwise put it there with
-Volume Down + Power, then run:
+Boot LineageOS, enable USB debugging, and connect the phone. The command verifies the running OS,
+then reboots the phone to the bootloader itself. It cannot verify a phone that is only in the
+bootloader or fastbootd:
 
 ```bash
 python3 scripts/install_lineage_locked.py root
@@ -126,12 +128,13 @@ python3 scripts/install_lineage_locked.py root
 
 The script:
 
-1. Runs Magisk's own `boot_patch.sh` against this device's `boot.img` with the device's pre-init
+1. Verifies that the running Android is LineageOS.
+2. Runs Magisk's own `boot_patch.sh` against this device's `boot.img` with the device's pre-init
    partition.
-2. Computes a new AVB hash descriptor for the patched image and rebuilds `vbmeta_lineage`.
-3. Installs the Magisk app over adb when the phone is reachable and also copies the APK to
+3. Computes a new AVB hash descriptor for the patched image and rebuilds `vbmeta_lineage`.
+4. Installs the Magisk app over adb when the phone is reachable and also copies the APK to
    `/sdcard/Download/`.
-4. Flashes `boot_<slot>` and `vbmeta_<slot>` and reboots.
+5. Flashes `boot_<slot>` and `vbmeta_<slot>` and reboots.
 
 ### Finish Magisk setup
 
@@ -174,9 +177,11 @@ To build the images without touching the phone:
 python3 scripts/install_lineage_locked.py root --patch-only --magisk-apk Magisk-v31.1.apk
 ```
 
-The artifacts are `zf9/out/boot_magisk.img` and `zf9/out/vbmeta_lineage.img`. Use `--no-download`
-to stop instead of downloading missing images, or `--preinit-device PATH` if a future Magisk
-version needs a different pre-init partition (the default is `/dev/block/by-name/metadata`).
+`--patch-only` does not contact the phone, so it skips the LineageOS check and cannot flash
+anything. The artifacts are `zf9/out/boot_magisk.img` and `zf9/out/vbmeta_lineage.img`. Use
+`--no-download` to stop instead of downloading missing images, or `--preinit-device PATH` if a
+future Magisk version needs a different pre-init partition (the default is
+`/dev/block/by-name/metadata`).
 
 Limitations:
 

@@ -1001,6 +1001,31 @@ def target_adb_serial(ctx: Ctx) -> str | None:
     return None
 
 
+def check_lineage(ctx: Ctx) -> None:
+    """Refuse to root unless Android is running the LineageOS build.
+
+    Fastboot cannot report the installed OS, so the check needs adb. This keeps
+    a stock phone from being flashed with a Lineage boot image by mistake.
+    """
+    info("verifying the installed OS")
+    serial = target_adb_serial(ctx)
+    if serial is None:
+        die("cannot verify LineageOS before rooting\n"
+            "  Boot the phone into LineageOS, enable USB debugging, authorize this "
+            "computer,\n  and pass --serial if more than one device is connected. "
+            "Then rerun `root`.")
+    ctx.serial = serial
+    version = ctx.adb_getprop("ro.lineage.version")
+    fingerprint = ctx.adb_getprop("ro.build.fingerprint")
+    marker = f"{version} {fingerprint}".lower()
+    if version or "lineage" in marker or "rinko" in marker:
+        ok(f"LineageOS detected: {version or fingerprint}")
+        return
+    die("refusing to root: the running OS does not look like LineageOS\n"
+        f"  ro.build.fingerprint = {fingerprint or 'unknown'}\n"
+        "  Install and boot LineageOS first; this keeps stock firmware safe.")
+
+
 def wait_for_adb(ctx: Ctx, timeout: int) -> bool:
     deadline = time.time() + timeout
     while time.time() < deadline:
@@ -1237,6 +1262,9 @@ def root(ctx: Ctx) -> None:
     preinit = ctx.args.preinit_device or MAGISK_PREINIT_DEFAULT
     if not preinit.startswith("/dev/block/"):
         die(f"--preinit-device must be a block device path, got {preinit!r}")
+
+    if not ctx.args.patch_only:
+        check_lineage(ctx)
 
     ensure_images(ctx, [], ROOT_PARTS)
     apk = fetch_magisk(ctx)
