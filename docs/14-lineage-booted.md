@@ -85,6 +85,15 @@ successful image uses the descriptors from the Lineage images themselves.
 The top-level `vbmeta` also chains recovery to the custom public key. When recovery is used, the
 re-signed recovery image must match that chain.
 
+## Root
+
+The `root` command patches the active slot's `boot` image with Magisk and recomputes its AVB hash
+descriptor over the patched bytes, because Magisk replaces the boot image's own vbmeta and footer.
+It rebuilds the top-level `vbmeta` with that descriptor and signs it with the same custom key, so
+verification stays enabled and the bootloader stays locked. Only `boot` and `vbmeta` are rewritten,
+and userdata is kept. `unroot` puts the unpatched `boot` and a freshly signed `vbmeta` back. See
+[Root with Magisk](install-easy.md#root-with-magisk).
+
 ## Tested vbmeta command
 
 The successful top-level Lineage vbmeta was built with AOSP `avbtool` 1.4.0 using the descriptors

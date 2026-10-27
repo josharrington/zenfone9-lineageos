@@ -13,6 +13,8 @@ Subcommands
   download  download the ASUS firmware and LineageOS ROM, and extract their images
   prepare   download missing images, then build the AVB artifacts
   install   download missing images, prepare, and flash the device
+  root      patch the Lineage boot image with Magisk and flash it, re-signing vbmeta
+  unroot    restore the unpatched Lineage boot chain
   verify    read the device state (adb or fastboot)
   restore   download missing stock images, then put the stock images back
 
@@ -32,7 +34,9 @@ Input layout (defaults)
                                (or pass --key PATH)
   <workdir>/avb_pub.bin        generated on first run
   <workdir>/out/               generated vbmeta + re-signed recovery
+  <workdir>/out/boot_magisk.img  Magisk-patched boot image (root command)
   <workdir>/downloads/         payload files; ZIPs are deleted after extraction
+                               (also caches the downloaded Magisk APK)
 
 The stock images are only needed for `prepare` (boot/dtbo/vendor_boot/vbmeta_system)
 and for `restore` (all of them). The Lineage images are needed for `install`.
@@ -43,17 +47,22 @@ Examples
   ./install_lineage_locked.py download --workdir ./zf9
   ./install_lineage_locked.py prepare  --workdir ./zf9
   ./install_lineage_locked.py install  --workdir ./zf9
+  ./install_lineage_locked.py root     --workdir ./zf9
+  ./install_lineage_locked.py unroot   --workdir ./zf9
   ./install_lineage_locked.py verify   --workdir ./zf9
 
 WARNING: this erases userdata and rewrites the active slot's logical partitions.
-Read docs/15-install-guide.md first.
+Read docs/15-install-guide.md first. The `root` command only rewrites `boot` and
+`vbmeta`; it needs the original AVB private key.
 """
 
 from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 import os
+import platform
 import re
 import shutil
 import struct
@@ -76,6 +85,8 @@ LINEAGE_PARTS = ["boot", "dtbo", "vendor_boot", "recovery", "vbmeta_system"] + L
 STOCK_PREPARE = ["boot", "dtbo", "vendor_boot", "vbmeta_system"]
 LINEAGE_PREPARE = ["boot", "dtbo", "vendor_boot", "recovery", "vbmeta_system",
                    "vendor", "odm", "vendor_dlkm"]
+ROOT_PARTS = ["boot", "dtbo", "vendor_boot", "vbmeta_system",
+              "vendor", "odm", "vendor_dlkm"]
 FIRMWARE_NAME = "UL-ASUS_AI2202-ASUS-34.0304.2004.145-1.1.1-2407-user.zip"
 FIRMWARE_URL = (
     "https://dlcdnets.asus.com/pub/ASUS/ZenFone/AI2202/" + FIRMWARE_NAME
@@ -86,6 +97,12 @@ ROM_URL = (
     "https://download.lynnrin.moe/ROM/ASUS%20Zenfone%209/LineageOS/" + ROM_NAME
 )
 ROM_SHA256 = "f466719609a6ad5e2db42e5e8e48a7f1b232a4348d883c31f93e21225c237bbc"
+
+# Magisk root: tools are pulled from the official APK. The host runs magiskboot;
+# the ramdisk binaries must always be the device's arm64-v8a builds.
+MAGISK_API = "https://api.github.com/repos/topjohnwu/Magisk/releases/latest"
+MAGISK_MIN_CODE = 27000
+MAGISK_PREINIT_DEFAULT = "/dev/block/by-name/metadata"
 
 C_RESET = "\033[0m"
 C_RED = "\033[31m"
@@ -113,6 +130,11 @@ def ok(msg: str) -> None:
     say(f"{C_GREEN}ok:{C_RESET} {msg}")
 
 
+def usb_debugging_hint() -> None:
+    say("   For adb (and `verify`), enable Settings -> About phone -> tap Build")
+    say("   number 7 times, then Settings -> System -> Developer options -> USB debugging.")
+
+
 def die(msg: str, code: int = 1) -> "None":
     say(f"{C_RED}error:{C_RESET} {msg}")
     raise SystemExit(code)
@@ -135,7 +157,8 @@ class Ctx:
 
     # -- process helpers ----------------------------------------------------
     def run(self, cmd: list[str], check: bool = True, quiet: bool = False,
-            timeout: int = 600) -> subprocess.CompletedProcess:
+            timeout: int = 600, cwd: Path | None = None,
+            env: dict[str, str] | None = None) -> subprocess.CompletedProcess:
         shown = " ".join(cmd)
         if self.dry:
             say(f"{C_YELLOW}[dry-run]{C_RESET} {shown}")
@@ -143,7 +166,8 @@ class Ctx:
         if not quiet:
             say(f"$ {shown}")
         try:
-            p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+            p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout,
+                               cwd=cwd, env=env)
         except FileNotFoundError:
             die(f"command not found: {cmd[0]}")
         except subprocess.TimeoutExpired:
@@ -335,6 +359,40 @@ def chain_descriptor(name: str, rloc: int, pubkey: bytes) -> bytes:
     body = struct.pack(BE + "III", rloc, len(n), len(pubkey)) + b"\0" * 64 + n + pubkey
     body += b"\0" * ((8 - len(body) % 8) % 8)   # avbtool aligns num_bytes_following
     return struct.pack(BE + "QQ", 4, len(body)) + body
+
+
+def hash_descriptor(name: str, path: Path, salt: bytes = b"",
+                    flags: int = 0) -> bytes:
+    """AVB hash descriptor for an image that has no embedded vbmeta of its own.
+
+    Magisk removes or rewrites the boot image's AVB footer, so its old descriptor
+    cannot be reused. The top-level vbmeta stays authoritative: hashing the whole
+    patched image keeps verification enabled (`--flags 0`).
+    """
+    data = path.read_bytes()
+    n = name.encode()
+    digest = hashlib.sha256(salt + data).digest()
+    body = (struct.pack(BE + "Q", len(data))
+            + b"sha256".ljust(32, b"\0")
+            + struct.pack(BE + "IIII", len(n), len(salt), len(digest), flags)
+            + b"\0" * 60 + n + salt + digest)
+    raw = struct.pack(BE + "QQ", 2, len(body)) + body
+    return raw + b"\0" * ((8 - len(raw) % 8) % 8)
+
+
+def verify_hash_descriptor(path: Path, raw: bytes) -> None:
+    tag, _ = struct.unpack_from(BE + "QQ", raw, 0)
+    if tag != 2:
+        die(f"{path}: descriptor is not a hash descriptor")
+    size = struct.unpack_from(BE + "Q", raw, 16)[0]
+    nl, sl, dl, _ = struct.unpack_from(BE + "IIII", raw, 56)
+    name = raw[132:132 + nl].decode()
+    salt = bytes(raw[132 + nl:132 + nl + sl])
+    digest = bytes(raw[132 + nl + sl:132 + nl + sl + dl])
+    if (size != path.stat().st_size
+            or hashlib.sha256(salt + path.read_bytes()).digest() != digest):
+        die(f"{path}: hash descriptor does not match the image")
+    ok(f"hash descriptor verifies: {name} ({size} bytes)")
 
 
 def sign_sha256(key_pem: Path, digest: bytes) -> bytes:
@@ -740,7 +798,8 @@ def build_rec(ctx: Ctx) -> dict[str, Path]:
     return {"pub": pub, "vbmeta_rec": vbmeta_rec, "recovery_ours": recovery_ours}
 
 
-def build_lineage(ctx: Ctx, pub: bytes) -> dict[str, Path]:
+def build_lineage(ctx: Ctx, pub: bytes,
+                  boot_descriptor: bytes | None = None) -> dict[str, Path]:
     info("checking Lineage boot + vendor images")
     lin = ctx.lineage
     for name in ("boot", "dtbo", "vendor_boot", "vendor", "odm", "vendor_dlkm",
@@ -750,7 +809,11 @@ def build_lineage(ctx: Ctx, pub: bytes) -> dict[str, Path]:
     info(f"Lineage vbmeta_system key: {len(lineage_vmsys_pub)} bytes")
 
     lin_descs: list[bytes] = []
-    for name in ("boot", "dtbo", "vendor_boot"):
+    if boot_descriptor is None:
+        lin_descs += descriptors_from_image(lin / "boot.img", tags=(1, 2))
+    else:
+        lin_descs.append(boot_descriptor)
+    for name in ("dtbo", "vendor_boot"):
         lin_descs += descriptors_from_image(lin / f"{name}.img", tags=(1, 2))
     for name in ("vendor", "odm", "vendor_dlkm"):
         lin_descs += descriptors_from_image(lin / f"{name}.img", tags=(1, 2))
@@ -770,6 +833,156 @@ def prepare(ctx: Ctx) -> dict[str, Path]:
     rec = build_rec(ctx)
     lin = build_lineage(ctx, rec["pub"])
     return {**rec, **lin}
+
+
+# ---------------------------------------------------------------------------
+# Magisk
+# ---------------------------------------------------------------------------
+def host_abi() -> str:
+    machine = platform.machine().lower()
+    if machine in ("x86_64", "amd64"):
+        return "x86_64"
+    if machine in ("aarch64", "arm64"):
+        return "arm64-v8a"
+    die(f"unsupported host architecture for magiskboot: {machine}")
+
+
+def magisk_apk_details(apk: Path) -> tuple[str, int]:
+    try:
+        with zipfile.ZipFile(apk) as zf:
+            text = zf.read("assets/util_functions.sh").decode("utf-8", "replace")
+    except (zipfile.BadZipFile, KeyError) as e:
+        die(f"{apk}: not a Magisk APK ({e})")
+    ver = re.search(r"^MAGISK_VER='([^']+)'", text, re.M)
+    code = re.search(r"^MAGISK_VER_CODE=(\d+)", text, re.M)
+    if not ver or not code:
+        die(f"{apk}: cannot read the Magisk version from assets/util_functions.sh")
+    return ver.group(1), int(code.group(1))
+
+
+def magisk_tool_files() -> dict[str, str]:
+    """Host magiskboot plus the arm64-v8a binaries that go into the ramdisk."""
+    abi = host_abi()
+    return {
+        "magiskboot": f"lib/{abi}/libmagiskboot.so",
+        "magiskinit": "lib/arm64-v8a/libmagiskinit.so",
+        "magisk": "lib/arm64-v8a/libmagisk.so",
+        "init-ld": "lib/arm64-v8a/libinit-ld.so",
+        "boot_patch.sh": "assets/boot_patch.sh",
+        "util_functions.sh": "assets/util_functions.sh",
+    }
+
+
+def fetch_magisk(ctx: Ctx) -> Path:
+    if ctx.args.magisk_apk:
+        apk = Path(ctx.args.magisk_apk).expanduser().resolve()
+        return need(apk, "Magisk APK")
+    if ctx.dry:
+        die("root cannot download Magisk during --dry-run; pass --magisk-apk PATH")
+
+    downloads = ctx.work / "downloads"
+    downloads.mkdir(parents=True, exist_ok=True)
+    info("looking up the latest Magisk release")
+    req = urllib.request.Request(
+        MAGISK_API, headers={"User-Agent": "zf9-installer/1",
+                             "Accept": "application/vnd.github+json"})
+    try:
+        with urllib.request.urlopen(req, timeout=60) as response:
+            release = json.load(response)
+    except (OSError, ValueError, urllib.error.URLError) as e:
+        die(f"Magisk release lookup failed: {e}\n"
+            "Download the APK manually and pass --magisk-apk PATH")
+
+    tag = str(release.get("tag_name") or "")
+    asset = next((a for a in release.get("assets", [])
+                  if str(a.get("name", "")).startswith("Magisk-")
+                  and str(a.get("name", "")).endswith(".apk")), None)
+    if not tag or asset is None:
+        die("the latest Magisk release has no Magisk-*.apk asset; "
+            "pass --magisk-apk PATH")
+
+    apk = downloads / str(asset["name"])
+    digest = str(asset.get("digest") or "")
+    expected = digest[len("sha256:"):] if digest.startswith("sha256:") else ""
+    if apk.exists() and not ctx.args.force:
+        info(f"using existing {apk}")
+        if expected and sha256_file(apk) != expected:
+            warn("existing Magisk APK does not match the release metadata; downloading again")
+            apk.unlink()
+        else:
+            if expected:
+                ok("Magisk APK SHA-256 matches the release metadata")
+            return apk
+
+    part = apk.with_name(apk.name + ".part")
+    info(f"downloading Magisk {tag}: {asset['browser_download_url']}")
+    try:
+        req = urllib.request.Request(str(asset["browser_download_url"]),
+                                     headers={"User-Agent": "zf9-installer/1"})
+        with urllib.request.urlopen(req, timeout=60) as response:
+            total = int(response.headers.get("Content-Length") or 0)
+            with part.open("wb") as f:
+                copy_progress(response, f, total, apk.name)
+    except (OSError, ValueError, urllib.error.URLError) as e:
+        part.unlink(missing_ok=True)
+        die(f"Magisk APK download failed: {e}")
+    os.replace(part, apk)
+
+    if expected:
+        actual = sha256_file(apk)
+        if actual != expected:
+            die(f"Magisk APK SHA-256 mismatch\n  expected: {expected}\n  actual:   {actual}")
+        ok("Magisk APK SHA-256 matches the release metadata")
+    return apk
+
+
+def extract_magisk_tools(ctx: Ctx, apk: Path) -> Path:
+    stage = ctx.out / "magisk"
+    if stage.exists():
+        shutil.rmtree(stage)
+    stage.mkdir(parents=True)
+    files = magisk_tool_files()
+    try:
+        with zipfile.ZipFile(apk) as zf:
+            names = set(zf.namelist())
+            missing = [src for src in files.values() if src not in names]
+            if missing:
+                die(f"{apk}: missing Magisk files: " + ", ".join(missing))
+            for dst, src in files.items():
+                target = stage / dst
+                with zf.open(src) as f, target.open("wb") as out:
+                    shutil.copyfileobj(f, out)
+                target.chmod(0o755)
+    except zipfile.BadZipFile as e:
+        die(f"invalid Magisk APK: {e}")
+    return stage
+
+
+def patch_boot(ctx: Ctx, src: Path, apk: Path, preinit: str) -> Path:
+    need(src, "Lineage boot image")
+    stage = extract_magisk_tools(ctx, apk)
+    shutil.copyfile(src, stage / "boot.img")
+
+    env = os.environ.copy()
+    env.update({
+        "BOOTMODE": "true",
+        "KEEPVERITY": "true",
+        "KEEPFORCEENCRYPT": "true",
+        "PATCHVBMETAFLAG": "false",
+        "RECOVERYMODE": "false",
+        "LEGACYSAR": "false",
+        "PREINITDEVICE": preinit,
+    })
+    info(f"patching boot.img with Magisk (pre-init device: {preinit})")
+    ctx.run(["sh", "boot_patch.sh", "boot.img"], cwd=stage, env=env)
+    new_boot = stage / "new-boot.img"
+    if not new_boot.is_file():
+        die("Magisk did not produce new-boot.img")
+
+    dst = ctx.out / "boot_magisk.img"
+    shutil.copyfile(new_boot, dst)
+    ok(f"Magisk-patched boot image: {dst} ({dst.stat().st_size} bytes)")
+    return dst
 
 
 # ---------------------------------------------------------------------------
@@ -843,6 +1056,16 @@ def check_super(ctx: Ctx, total: int) -> None:
             die(f"logical images ({total} bytes) do not fit in super ({super_size})")
     else:
         warn(f"could not read super size (got {super_size!r})")
+
+
+def check_image_fits(ctx: Ctx, partition: str, image: Path) -> None:
+    size = ctx.fastboot_getvar(f"partition-size:{partition}")
+    if size.startswith("0x"):
+        if image.stat().st_size > int(size, 16):
+            die(f"{image} ({image.stat().st_size} bytes) does not fit in "
+                f"{partition} ({size})")
+    else:
+        warn(f"could not read the size of {partition} (got {size!r})")
 
 
 def flash_parts(ctx: Ctx, slot: str) -> None:
@@ -920,8 +1143,84 @@ def install(ctx: Ctx) -> None:
     ctx.fastboot("reboot", check=False)
     say("")
     ok("install finished. First boot initialises /data; do not panic if the screen is")
-    say("   black for a few minutes. When the UI is up, enable Developer options ->")
-    say("   USB debugging if you want to run `verify`.")
+    say("   black for a few minutes. When the UI is up:")
+    usb_debugging_hint()
+
+
+# ---------------------------------------------------------------------------
+# root / unroot
+# ---------------------------------------------------------------------------
+def root(ctx: Ctx) -> None:
+    if not ctx.key.exists():
+        die(f"root needs the AVB private key that matches avb_custom_key: {ctx.key}\n"
+            "Use --key PATH or put the original key at <workdir>/key.pem.")
+    if ctx.dry:
+        die("root does not support --dry-run; use --patch-only to inspect the artifacts")
+
+    preinit = ctx.args.preinit_device or MAGISK_PREINIT_DEFAULT
+    if not preinit.startswith("/dev/block/"):
+        die(f"--preinit-device must be a block device path, got {preinit!r}")
+
+    ensure_images(ctx, [], ROOT_PARTS)
+    apk = fetch_magisk(ctx)
+    ver, code = magisk_apk_details(apk)
+    if code < MAGISK_MIN_CODE:
+        die(f"Magisk {ver} (code {code}) is too old; use v27 or newer")
+    ok(f"Magisk {ver} ({apk.name})")
+
+    pub = gen_key(ctx)  # derives avb_pub.bin from the existing key; never generates one
+    patched = patch_boot(ctx, ctx.lineage / "boot.img", apk, preinit)
+    boot_desc = hash_descriptor("boot", patched)
+    verify_hash_descriptor(patched, boot_desc)
+    art = build_lineage(ctx, pub, boot_descriptor=boot_desc)
+
+    if ctx.args.patch_only:
+        say("")
+        ok("patched images are ready; not flashing (--patch-only)")
+        say(f"   boot:   {patched}")
+        say(f"   vbmeta: {art['vbmeta_lineage']}")
+        return
+
+    ensure_bootloader(ctx)
+    slot = check_device(ctx)
+    ctx.confirm(f"Flash the Magisk-patched boot image to slot {slot}? "
+                "This does not erase data.")
+    check_image_fits(ctx, f"boot_{slot}", patched)
+
+    info("flashing Magisk-patched boot + re-signed vbmeta")
+    flash(ctx, f"boot_{slot}", patched)
+    flash(ctx, f"vbmeta_{slot}", art["vbmeta_lineage"])
+    ctx.fastboot("reboot", check=False)
+    say("")
+    ok("root install finished. Open the Magisk app and let it finish setup.")
+    say("   When the UI is up:")
+    usb_debugging_hint()
+    say("   If the phone does not boot, run `unroot` from the bootloader.")
+
+
+def unroot(ctx: Ctx) -> None:
+    if not ctx.key.exists():
+        die(f"unroot needs the AVB private key that matches avb_custom_key: {ctx.key}\n"
+            "Use --key PATH or put the original key at <workdir>/key.pem.")
+    if ctx.dry:
+        die("unroot does not support --dry-run")
+
+    ensure_images(ctx, [], ROOT_PARTS)
+    pub = gen_key(ctx)
+    art = build_lineage(ctx, pub)
+
+    ensure_bootloader(ctx)
+    slot = check_device(ctx)
+    ctx.confirm(f"Restore the unpatched Lineage boot chain on slot {slot}? "
+                "This does not erase data.")
+    info("flashing the unpatched Lineage boot + original vbmeta")
+    check_image_fits(ctx, f"boot_{slot}", ctx.lineage / "boot.img")
+    flash(ctx, f"boot_{slot}", ctx.lineage / "boot.img")
+    flash(ctx, f"vbmeta_{slot}", art["vbmeta_lineage"])
+    ctx.fastboot("reboot", check=False)
+    say("")
+    ok("unroot finished. Magisk no longer runs; /data/adb files are left behind")
+    say("   and a userdata wipe or `restore` removes them.")
 
 
 # ---------------------------------------------------------------------------
@@ -1002,7 +1301,9 @@ def verify(ctx: Ctx) -> None:
         p = ctx.fastboot("oem", "device-info", check=False)
         say((p.stdout or "").strip())
         return
-    die("no adb or fastboot device found")
+    die("no adb or fastboot device found\n"
+        "  For adb, enable Settings -> About phone -> tap Build number 7 times, "
+        "then\n  Settings -> System -> Developer options -> USB debugging.")
 
 
 def doctor(ctx: Ctx) -> None:
@@ -1046,6 +1347,19 @@ def doctor(ctx: Ctx) -> None:
     else:
         info("key will be generated on prepare")
 
+    info("root")
+    if ctx.args.magisk_apk:
+        apk = Path(ctx.args.magisk_apk).expanduser()
+        if apk.is_file():
+            ver, code = magisk_apk_details(apk)
+            ok(f"Magisk {ver} ({code})")
+        else:
+            warn(f"Magisk APK not found: {apk}")
+    else:
+        info("no --magisk-apk; root downloads the latest official release")
+    if not ctx.key.exists():
+        warn("root needs the original key that matches avb_custom_key")
+
 
 # ---------------------------------------------------------------------------
 # CLI
@@ -1054,7 +1368,8 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("command",
-                    choices=["doctor", "download", "prepare", "install", "verify", "restore"])
+                    choices=["doctor", "download", "prepare", "install", "root",
+                             "unroot", "verify", "restore"])
     ap.add_argument("--workdir", default="./zf9")
     ap.add_argument("--images", default=None,
                     help="directory containing lineage/ and stock/ (default: <workdir>/images)")
@@ -1084,6 +1399,13 @@ def main() -> None:
     ap.add_argument("--force", action="store_true", help="download the ZIPs again")
     ap.add_argument("--no-download", action="store_true",
                     help="do not download missing images")
+    ap.add_argument("--magisk-apk", default=None,
+                    help="Magisk APK for root (default: download the latest release)")
+    ap.add_argument("--preinit-device", default=None,
+                    help="Magisk pre-init block device "
+                         f"(default: {MAGISK_PREINIT_DEFAULT})")
+    ap.add_argument("--patch-only", action="store_true",
+                    help="root: build the patched images but do not flash them")
     args = ap.parse_args()
 
     if args.command != "download" and (args.zip_only or args.stock_only
@@ -1092,6 +1414,11 @@ def main() -> None:
                  "with the download command")
     if args.command == "download" and args.no_download:
         ap.error("--no-download is not valid with the download command")
+    if args.command not in ("root", "doctor") and args.magisk_apk:
+        ap.error("--magisk-apk is only valid with the root or doctor command")
+    if args.command != "root" and (args.preinit_device or args.patch_only):
+        ap.error("--preinit-device and --patch-only are only valid with the "
+                 "root command")
 
     if args.serial:
         os.environ["ANDROID_SERIAL"] = args.serial
@@ -1110,6 +1437,10 @@ def main() -> None:
         ok("prepared. Next: connect the phone in the bootloader and run `install`.")
     elif args.command == "install":
         install(ctx)
+    elif args.command == "root":
+        root(ctx)
+    elif args.command == "unroot":
+        unroot(ctx)
     elif args.command == "verify":
         verify(ctx)
     elif args.command == "restore":

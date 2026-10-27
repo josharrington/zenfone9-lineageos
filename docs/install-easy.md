@@ -99,3 +99,57 @@ If `fastboot reboot fastboot` does not reach fastbootd, the script pauses and as
 **Advanced → Reboot to fastbootd** (or **Enter fastboot**) in Lineage Recovery.
 
 After installation, follow the shared [first boot and verification instructions](15-install-guide.md#5-first-boot).
+
+## Root with Magisk
+
+The `root` command patches the Lineage boot image with Magisk and re-signs the top-level `vbmeta`
+with your AVB key. Verification stays enabled (`--flags 0`) and the bootloader stays locked; only
+`boot_<slot>` and `vbmeta_<slot>` are rewritten, so userdata is kept.
+
+Requirements:
+
+- The original private key that matches `avb_custom_key` (`zf9/key.pem`, or `--key PATH`). The
+  command never generates a new key.
+- `images/lineage/boot.img` from the same Lineage build that is installed.
+- Magisk v27 or newer. By default `root` downloads the latest official APK to
+  `zf9/downloads/`; pass `--magisk-apk PATH` to use a specific APK instead.
+
+Put the phone in the bootloader (or enable USB debugging and let the script reboot it from
+Android/fastbootd), then run:
+
+```bash
+python3 scripts/install_lineage_locked.py root
+```
+
+The script patches `boot.img` with Magisk, computes a new AVB hash descriptor for the patched
+image, rebuilds `vbmeta_lineage`, checks that the patched image fits the `boot` partition, flashes
+both partitions, and reboots. Open the Magisk app after boot to finish setup.
+
+To build the images without touching the phone:
+
+```bash
+python3 scripts/install_lineage_locked.py root --patch-only --magisk-apk Magisk-v31.1.apk
+```
+
+The artifacts are `zf9/out/boot_magisk.img` and `zf9/out/vbmeta_lineage.img`. Use `--no-download`
+to stop instead of downloading missing images, or `--preinit-device PATH` if a future Magisk
+version needs a different pre-init partition (the default is `/dev/block/by-name/metadata`).
+
+Limitations:
+
+- Root is lost when a ROM image is reflashed or restored; run `root` again afterwards.
+- A wrong key in `avb_custom_key` makes the phone fail verification. Keep `key.pem` backed up.
+- Play Integrity and some banking or wallet apps may fail. The boot state is `yellow` with the
+  custom key, and Magisk itself is detectable.
+- If the phone does not boot after rooting, use `unroot` below.
+
+## Remove root
+
+Run this from the bootloader to put the unpatched Lineage boot chain back:
+
+```bash
+python3 scripts/install_lineage_locked.py unroot
+```
+
+`unroot` flashes the original Lineage `boot` and a freshly signed `vbmeta`; it does not erase data.
+Magisk's `/data/adb` files remain but are inactive. A data wipe or `restore` removes them.
