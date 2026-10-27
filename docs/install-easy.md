@@ -78,7 +78,7 @@ Run these commands from the repository root. The script downloads missing images
 ```bash
 python3 scripts/install_lineage_locked.py doctor
 python3 scripts/install_lineage_locked.py prepare
-# Put the phone in the bootloader (Volume Down + Power), then:
+# Connect the phone (USB debugging enabled), then:
 python3 scripts/install_lineage_locked.py install
 ```
 
@@ -114,8 +114,9 @@ Requirements:
 - Magisk v27 or newer. By default `root` downloads the latest official APK to
   `zf9/downloads/`; pass `--magisk-apk PATH` to use a specific APK instead.
 
-Put the phone in the bootloader (or enable USB debugging and let the script reboot it from
-Android/fastbootd), then run:
+Put the phone in the bootloader, or leave it in LineageOS with USB debugging enabled. The script
+reboots it to the bootloader itself when adb or fastbootd is reachable; otherwise put it there with
+Volume Down + Power, then run:
 
 ```bash
 python3 scripts/install_lineage_locked.py root
@@ -145,7 +146,8 @@ Limitations:
 
 ## Remove root
 
-Run this from the bootloader to put the unpatched Lineage boot chain back:
+Run this with the phone in LineageOS (USB debugging enabled), fastbootd, or the bootloader. The
+script moves it to the bootloader itself when it can:
 
 ```bash
 python3 scripts/install_lineage_locked.py unroot

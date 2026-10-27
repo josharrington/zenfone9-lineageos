@@ -244,14 +244,18 @@ class Ctx:
         die(f"timed out waiting for {'fastbootd' if userspace else 'bootloader'}")
 
     # -- adb ----------------------------------------------------------------
-    def adb_devices(self) -> list[str]:
+    def adb_states(self) -> list[tuple[str, str]]:
         p = self.run(["adb", "devices"], check=False, quiet=True)
         out = []
         for line in (p.stdout or "").splitlines()[1:]:
             parts = line.split()
-            if len(parts) >= 2 and parts[1] in ("device", "recovery", "sideload"):
-                out.append(parts[0])
+            if len(parts) >= 2:
+                out.append((parts[0], parts[1]))
         return out
+
+    def adb_devices(self) -> list[str]:
+        return [serial for serial, state in self.adb_states()
+                if state in ("device", "recovery", "sideload")]
 
     def adb(self, *args: str, check: bool = True) -> subprocess.CompletedProcess:
         cmd = ["adb"]
@@ -1003,13 +1007,36 @@ def ensure_bootloader(ctx: Ctx) -> None:
         ctx.fastboot("reboot", "bootloader", check=False)
         ctx.wait_fastboot(userspace=False, timeout=180)
         return
-    adb = ctx.adb_devices()
-    if adb:
-        ctx.serial = adb[0]
+
+    adb = ctx.adb_states()
+    authorized = [(s, st) for s, st in adb
+                  if st in ("device", "recovery", "sideload")]
+    if authorized:
+        ctx.serial = authorized[0][0]
         info(f"rebooting {ctx.serial} from Android to the bootloader")
         ctx.adb("reboot", "bootloader", check=False)
-        ctx.wait_fastboot(userspace=False, timeout=120)
+        ctx.wait_fastboot(userspace=False, timeout=180)
         return
+
+    unauthorized = [s for s, st in adb if st in ("unauthorized", "offline")]
+    if unauthorized:
+        ctx.serial = unauthorized[0]
+        warn("USB debugging is not authorized on the phone")
+        say("Unlock the phone and tap 'Allow' on the USB debugging prompt.")
+        say("The script will reboot it to the bootloader once adb is allowed.")
+        deadline = time.time() + 120
+        while time.time() < deadline:
+            if ctx.probe_fastboot(want_userspace=False):
+                return
+            if any(s == ctx.serial and st in ("device", "recovery", "sideload")
+                   for s, st in ctx.adb_states()):
+                info(f"rebooting {ctx.serial} from Android to the bootloader")
+                ctx.adb("reboot", "bootloader", check=False)
+                ctx.wait_fastboot(userspace=False, timeout=180)
+                return
+            time.sleep(2)
+        ctx.selector = None
+
     if ctx.edl_present():
         say("")
         warn("The phone is in EDL (05c6:900x).")
@@ -1195,7 +1222,8 @@ def root(ctx: Ctx) -> None:
     ok("root install finished. Open the Magisk app and let it finish setup.")
     say("   When the UI is up:")
     usb_debugging_hint()
-    say("   If the phone does not boot, run `unroot` from the bootloader.")
+    say("   If the phone does not boot, reach the bootloader with Vol Down + Power,")
+    say("   then run `unroot`.")
 
 
 def unroot(ctx: Ctx) -> None:
@@ -1434,7 +1462,8 @@ def main() -> None:
     elif args.command == "prepare":
         prepare(ctx)
         say("")
-        ok("prepared. Next: connect the phone in the bootloader and run `install`.")
+        ok("prepared. Next: connect the phone (Android with USB debugging, or the")
+        say("   bootloader) and run `install`; it moves the phone to the bootloader.")
     elif args.command == "install":
         install(ctx)
     elif args.command == "root":
