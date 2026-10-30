@@ -23,11 +23,15 @@ loading a different operating system.
 **Flashing erases data and can leave the phone unrecoverable.** Read the
 [requirements and safety warnings](docs/15-install-guide.md) before starting.
 
-- [Host setup](docs/setup.md)
+- Host setup: [Linux](docs/setup.md) · [macOS](docs/setup-macos.md) · [Windows](docs/setup-windows.md)
+- [TL;DR: script-assisted installation](docs/install-easy.md#tldr)
 - [Script-assisted installation](docs/install-easy.md)
 - [Root with Magisk and unroot](docs/install-easy.md#root-with-magisk)
 - [Manual installation](docs/install-manual.md) — image-signing commands are incomplete
 - [How the installation works and tested evidence](docs/14-lineage-booted.md)
+
+> **macOS and Windows are untested.** The macOS and Windows instructions have not been tested on a
+> phone. The Linux path is the tested one; treat the other platforms as experimental.
 
 ## Downloads
 

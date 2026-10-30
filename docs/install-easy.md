@@ -4,6 +4,65 @@ This method uses `scripts/install_lineage_locked.py` to prepare and flash the im
 less manual work, but it is **not safe to run unattended**. The manual flashing method is described
 in [Manual installation](install-manual.md).
 
+## TL;DR
+
+**This erases all data and can leave the phone unrecoverable. Read the warnings below first.**
+
+> **macOS and Windows are untested.** Their instructions have not been tested on a phone. The Linux
+> path is the tested one; treat macOS and Windows as experimental.
+
+1. Install the host tools for your platform:
+
+   **Linux** — [full setup](setup.md)
+
+   ```bash
+   sudo apt update
+   sudo apt install android-tools-adb android-tools-fastboot openssl python3
+   ```
+
+   Then install [`payload-dumper-go`](https://github.com/ssut/payload-dumper-go/releases) and put it
+   on your `PATH`.
+
+   **macOS** — [full setup](setup-macos.md)
+
+   ```bash
+   brew install python openssl@3 payload-dumper-go
+   brew install --cask android-platform-tools
+   export PATH="$(brew --prefix openssl@3)/bin:$PATH"
+   ```
+
+   **Windows** — [full setup](setup-windows.md)
+
+   ```powershell
+   winget install --id Python.Python.3.12 -e
+   winget install --id Google.PlatformTools -e
+   winget install --id ShiningLight.OpenSSL.Light -e
+   ```
+
+   Then install `payload-dumper-go` and the USB driver as described in the setup page.
+
+2. Enable USB debugging on the phone, connect it, and run these from the repository root:
+
+   ```bash
+   python3 scripts/install_lineage_locked.py doctor
+   python3 scripts/install_lineage_locked.py install
+   ```
+
+   On Windows, use the `py -3` launcher instead:
+
+   ```powershell
+   py -3 scripts/install_lineage_locked.py doctor
+   py -3 scripts/install_lineage_locked.py install
+   ```
+
+`install` downloads the tested firmware and ROM, builds the images, and flashes the phone. The first
+boot can stay black for several minutes.
+
+Back up `zf9/key.pem` afterwards; you need it for restore and future updates. To root, boot LineageOS
+and run `python3 scripts/install_lineage_locked.py root` on Linux. On macOS and Windows, patch
+`boot.img` in the Magisk app first, then use `root --patched-boot` (see
+[Root with Magisk](#root-with-magisk)).
+
 ## Before you start
 
 Read the [shared safety warnings, requirements, and file layout](15-install-guide.md). The script
@@ -113,8 +172,9 @@ Requirements:
 - The original private key that matches `avb_custom_key` (`zf9/key.pem`, or `--key PATH`). The
   command never generates a new key.
 - `images/lineage/boot.img` from the same Lineage build that is installed.
-- Magisk v27 or newer. By default `root` downloads the latest official APK to
-  `zf9/downloads/`; pass `--magisk-apk PATH` to use a specific APK instead.
+- Magisk v27 or newer. On Linux, `root` downloads the latest official APK to `zf9/downloads/` by
+  default; pass `--magisk-apk PATH` to use a specific APK instead. On macOS and Windows, use the
+  Magisk app on the phone (see [Patch on the phone](#patch-on-the-phone-windows-and-macos)).
 - LineageOS must be running with USB debugging enabled. Before patching anything, `root` checks the
   running OS over adb and refuses to flash a phone that does not report LineageOS.
 
@@ -129,12 +189,54 @@ python3 scripts/install_lineage_locked.py root
 The script:
 
 1. Verifies that the running Android is LineageOS.
-2. Runs Magisk's own `boot_patch.sh` against this device's `boot.img` with the device's pre-init
-   partition.
+2. On Linux, runs Magisk's own `boot_patch.sh` against this device's `boot.img` with the device's
+   pre-init partition. With `--patched-boot`, it uses the image supplied instead.
 3. Computes a new AVB hash descriptor for the patched image and rebuilds `vbmeta_lineage`.
 4. Installs the Magisk app over adb when the phone is reachable and also copies the APK to
    `/sdcard/Download/`.
 5. Flashes `boot_<slot>` and `vbmeta_<slot>` and reboots.
+
+### Patch on the phone (Windows and macOS)
+
+Native host patching runs a Linux `magiskboot` binary from the Magisk APK, so the plain `root`
+command only works on Linux. On macOS and Windows, let the Magisk app patch the image, then flash it
+with `--patched-boot`.
+
+1. Install the Magisk app on the phone (the official APK from the
+   [Magisk releases](https://github.com/topjohnwu/Magisk/releases), or an APK already in
+   `zf9/downloads/`). Enable USB debugging.
+2. Copy the installed build's boot image to the phone:
+
+   ```bash
+   adb push zf9/images/lineage/boot.img /sdcard/Download/boot.img
+   ```
+
+3. In the Magisk app, tap **Install → Select and Patch a File**, choose
+   `/sdcard/Download/boot.img`, and let it finish. It writes a `magisk_patched-*.img` file to
+   `/sdcard/Download/`.
+4. Copy the patched image back:
+
+   ```bash
+   adb shell ls /sdcard/Download/magisk_patched-*.img
+   adb pull /sdcard/Download/magisk_patched-XXXXX.img zf9/boot_magisk.img
+   ```
+
+5. Flash it. The script still checks that LineageOS is running, rebuilds `vbmeta_lineage` with your
+   key, and flashes both partitions:
+
+   ```bash
+   python3 scripts/install_lineage_locked.py root --patched-boot zf9/boot_magisk.img
+   ```
+
+   On Windows use `py -3` and a PowerShell path:
+
+   ```powershell
+   py -3 scripts/install_lineage_locked.py root --patched-boot .\zf9\boot_magisk.img
+   ```
+
+`--patched-boot` does not install the Magisk app; the phone already has it. Pass `--magisk-apk PATH`
+if you also want the script to install or push an APK. `--preinit-device` is not valid with
+`--patched-boot`, because the phone's Magisk app chose the pre-init device when it patched the image.
 
 ### Finish Magisk setup
 
@@ -165,8 +267,9 @@ stays locked and dm-verity stays enforcing:
 ![Root Checker reporting Root Access Verified on a locked bootloader](images/root-checker.png)
 
 
-The script patches `boot.img` on the host with Magisk’s official `boot_patch.sh`, using this
-device’s own image and pre-init partition. Do not copy `boot_magisk.img` to another phone or reuse
+On Linux, the script patches `boot.img` on the host with Magisk’s official `boot_patch.sh`, using
+this device’s own image and pre-init partition. On macOS and Windows, `--patched-boot` uses an image
+patched on the phone instead. In both cases, do not copy `boot_magisk.img` to another phone or reuse
 it after a ROM update. Also do not run the guide’s
 `fastboot flash vbmeta --disable-verity --disable-verification` step: this install relies on a
 locked bootloader with verification enabled, and the script re-signs `vbmeta` instead.
@@ -177,11 +280,18 @@ To build the images without touching the phone:
 python3 scripts/install_lineage_locked.py root --patch-only --magisk-apk Magisk-v31.1.apk
 ```
 
+On macOS and Windows, pass the image that the Magisk app already patched:
+
+```bash
+python3 scripts/install_lineage_locked.py root --patch-only --patched-boot zf9/boot_magisk.img
+```
+
 `--patch-only` does not contact the phone, so it skips the LineageOS check and cannot flash
-anything. The artifacts are `zf9/out/boot_magisk.img` and `zf9/out/vbmeta_lineage.img`. Use
-`--no-download` to stop instead of downloading missing images, or `--preinit-device PATH` if a
-future Magisk version needs a different pre-init partition (the default is
-`/dev/block/by-name/metadata`).
+anything. Without `--patched-boot`, the artifacts are `zf9/out/boot_magisk.img` and
+`zf9/out/vbmeta_lineage.img`. With `--patched-boot`, the boot image is the file you supplied and the
+command only writes `zf9/out/vbmeta_lineage.img`. Use `--no-download` to stop instead of downloading
+missing images, or `--preinit-device PATH` if a future Magisk version needs a different pre-init
+partition (the default is `/dev/block/by-name/metadata`).
 
 Limitations:
 

@@ -49,9 +49,11 @@ installed, verified, and loaded.
 
 **Host**
 
-- Linux with `adb`, `fastboot`, `openssl`, Python 3.8+, and `payload-dumper-go` to extract images.
-  See [Set up the host](setup.md) for installation and checks. macOS and WSL have not been verified
-  here; USB access in all required modes is essential.
+- Linux (tested), macOS 13+, or Windows 10 22H2/Windows 11 x64, with `adb`, `fastboot`, `openssl`,
+  Python 3.8+ (64-bit), and `payload-dumper-go` to extract images. See
+  [Set up the host on Linux](setup.md), [macOS](setup-macos.md), or [Windows](setup-windows.md) for
+  installation and checks. macOS and Windows have not been tested on a phone; treat them as
+  experimental. WSL has not been verified. USB access in all required modes is essential.
 - USB access to the phone in both Android and fastboot/fastbootd modes.
 - Enough free disk space for both image sets and enough RAM to read the largest image into memory.
   The preparation script reads whole images into memory.

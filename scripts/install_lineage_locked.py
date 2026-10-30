@@ -14,6 +14,7 @@ Subcommands
   prepare   download missing images, then build the AVB artifacts
   install   download missing images, prepare, and flash the device
   root      patch the Lineage boot image with Magisk and flash it, re-signing vbmeta
+            (use --patched-boot to flash an image patched by the Magisk app)
   unroot    restore the unpatched Lineage boot chain
   verify    read the device state (adb or fastboot)
   restore   download missing stock images, then put the stock images back
@@ -105,11 +106,31 @@ MAGISK_MIN_CODE = 27000
 MAGISK_PREINIT_DEFAULT = "/dev/block/by-name/metadata"
 MAGISK_PACKAGE = "com.topjohnwu.magisk"
 
-C_RESET = "\033[0m"
-C_RED = "\033[31m"
-C_GREEN = "\033[32m"
-C_YELLOW = "\033[33m"
-C_CYAN = "\033[36m"
+
+def _enable_ansi() -> bool:
+    """Return whether ANSI colour codes are safe to print on this terminal."""
+    if os.environ.get("NO_COLOR"):
+        return False
+    if os.name != "nt":
+        return True
+    try:
+        import ctypes
+        kernel32 = ctypes.windll.kernel32
+        handle = kernel32.GetStdHandle(-11)  # STD_OUTPUT_HANDLE
+        mode = ctypes.c_uint32()
+        if not kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
+            return False
+        return bool(kernel32.SetConsoleMode(handle, mode.value | 0x0004))
+    except Exception:
+        return False
+
+
+_COLOR = _enable_ansi()
+C_RESET = "\033[0m" if _COLOR else ""
+C_RED = "\033[31m" if _COLOR else ""
+C_GREEN = "\033[32m" if _COLOR else ""
+C_YELLOW = "\033[33m" if _COLOR else ""
+C_CYAN = "\033[36m" if _COLOR else ""
 
 
 # ---------------------------------------------------------------------------
@@ -155,6 +176,7 @@ class Ctx:
         self.dry = bool(args.dry_run)
         self.serial: str | None = None
         self.selector: str | None = None
+        self.system = platform.system()
 
     # -- process helpers ----------------------------------------------------
     def run(self, cmd: list[str], check: bool = True, quiet: bool = False,
@@ -214,7 +236,9 @@ class Ctx:
     def probe_fastboot(self, want_userspace: bool | None = None) -> bool:
         """Pick a live fastboot node and store serial + usb-path selector."""
         for serial, usb, mode in self.fastboot_devices():
-            selector = usb or serial
+            # The usb: path is a Linux fastboot selector. Windows and macOS
+            # accept the serial, which is stable across boot modes.
+            selector = (usb or serial) if self.system == "Linux" else (serial or usb)
             self.selector = selector
             prod = self.fastboot_getvar("product")
             if not prod:
@@ -270,7 +294,7 @@ class Ctx:
         return (p.stdout or "").strip()
 
     def edl_present(self) -> bool:
-        if not self.have("lsusb"):
+        if self.system != "Linux" or not self.have("lsusb"):
             return False
         p = self.run(["lsusb"], check=False, quiet=True)
         return bool(re.search(r"05c6:900[0-9a-f]", p.stdout or ""))
@@ -488,13 +512,34 @@ def descriptor_names(descriptors: list[bytes]) -> list[str]:
 # ---------------------------------------------------------------------------
 # key + recovery
 # ---------------------------------------------------------------------------
+def restrict_key(path: Path) -> None:
+    """Best-effort private-key permissions on POSIX and Windows."""
+    try:
+        path.chmod(0o600)
+    except OSError:
+        pass
+    if os.name != "nt":
+        return
+    user = os.environ.get("USERNAME")
+    if not user:
+        return
+    domain = os.environ.get("USERDOMAIN")
+    principal = f"{domain}\\{user}" if domain else user
+    try:
+        subprocess.run(["icacls", str(path), "/inheritance:r",
+                        "/grant:r", f"{principal}:R"],
+                       capture_output=True, text=True, timeout=15)
+    except OSError:
+        pass
+
+
 def gen_key(ctx: Ctx) -> bytes:
     ctx.work.mkdir(parents=True, exist_ok=True)
     if not ctx.key.exists():
         info("generating a 4096-bit AVB key")
         ctx.run(["openssl", "genpkey", "-algorithm", "RSA",
                  "-pkeyopt", "rsa_keygen_bits:4096", "-out", str(ctx.key)])
-        ctx.key.chmod(0o600)
+        restrict_key(ctx.key)
     mod = ctx.run(["openssl", "rsa", "-in", str(ctx.key), "-noout", "-modulus"],
                   quiet=True).stdout.strip()
     n = int(mod.split("=")[1], 16)
@@ -511,7 +556,8 @@ def gen_key(ctx: Ctx) -> bytes:
             + n.to_bytes(bits // 8, "big")
             + rr.to_bytes(bits // 8, "big"))
     ctx.pub.write_bytes(blob)
-    ctx.pub.chmod(0o644)
+    if os.name != "nt":
+        ctx.pub.chmod(0o644)
     info(f"AVB public key blob: {ctx.pub} ({len(blob)} bytes, {bits}-bit)")
     return blob
 
@@ -957,7 +1003,8 @@ def extract_magisk_tools(ctx: Ctx, apk: Path) -> Path:
                 target = stage / dst
                 with zf.open(src) as f, target.open("wb") as out:
                     shutil.copyfileobj(f, out)
-                target.chmod(0o755)
+                if os.name != "nt":
+                    target.chmod(0o755)
     except zipfile.BadZipFile as e:
         die(f"invalid Magisk APK: {e}")
     return stage
@@ -1252,12 +1299,35 @@ def install(ctx: Ctx) -> None:
 # ---------------------------------------------------------------------------
 # root / unroot
 # ---------------------------------------------------------------------------
+def patched_boot_image(path: Path) -> Path:
+    path = path.expanduser().resolve()
+    if not path.is_file():
+        die(f"patched boot image not found: {path}")
+    if path.stat().st_size == 0:
+        die(f"{path}: empty file")
+    with path.open("rb") as f:
+        magic = f.read(8)
+    if magic != b"ANDROID!":
+        die(f"{path}: not an Android boot image (expected ANDROID! magic)")
+    return path
+
+
 def root(ctx: Ctx) -> None:
     if not ctx.key.exists():
         die(f"root needs the AVB private key that matches avb_custom_key: {ctx.key}\n"
             "Use --key PATH or put the original key at <workdir>/key.pem.")
     if ctx.dry:
         die("root does not support --dry-run; use --patch-only to inspect the artifacts")
+
+    use_patched = ctx.args.patched_boot is not None
+    if use_patched and ctx.args.preinit_device:
+        die("--preinit-device is not valid with --patched-boot; "
+            "the Magisk app chose the pre-init device when it patched the image")
+    if not use_patched and ctx.system != "Linux":
+        die(f"native Magisk patching needs Linux (this host is {ctx.system}).\n"
+            "Patch images/lineage/boot.img in the Magisk app on the phone, copy the\n"
+            "patched image back, then rerun with --patched-boot PATH.\n"
+            "See docs/install-easy.md#root-with-magisk.")
 
     preinit = ctx.args.preinit_device or MAGISK_PREINIT_DEFAULT
     if not preinit.startswith("/dev/block/"):
@@ -1267,14 +1337,26 @@ def root(ctx: Ctx) -> None:
         check_lineage(ctx)
 
     ensure_images(ctx, [], ROOT_PARTS)
-    apk = fetch_magisk(ctx)
-    ver, code = magisk_apk_details(apk)
-    if code < MAGISK_MIN_CODE:
-        die(f"Magisk {ver} (code {code}) is too old; use v27 or newer")
-    ok(f"Magisk {ver} ({apk.name})")
-
     pub = gen_key(ctx)  # derives avb_pub.bin from the existing key; never generates one
-    patched = patch_boot(ctx, ctx.lineage / "boot.img", apk, preinit)
+
+    apk: Path | None = None
+    if use_patched:
+        patched = patched_boot_image(Path(ctx.args.patched_boot))
+        info(f"using pre-patched boot image: {patched}")
+        if ctx.args.magisk_apk:
+            apk = fetch_magisk(ctx)
+            ver, code = magisk_apk_details(apk)
+            if code < MAGISK_MIN_CODE:
+                die(f"Magisk {ver} (code {code}) is too old; use v27 or newer")
+            ok(f"Magisk {ver} ({apk.name})")
+    else:
+        apk = fetch_magisk(ctx)
+        ver, code = magisk_apk_details(apk)
+        if code < MAGISK_MIN_CODE:
+            die(f"Magisk {ver} (code {code}) is too old; use v27 or newer")
+        ok(f"Magisk {ver} ({apk.name})")
+        patched = patch_boot(ctx, ctx.lineage / "boot.img", apk, preinit)
+
     boot_desc = hash_descriptor("boot", patched)
     verify_hash_descriptor(patched, boot_desc)
     art = build_lineage(ctx, pub, boot_descriptor=boot_desc)
@@ -1287,7 +1369,7 @@ def root(ctx: Ctx) -> None:
         return
 
     # The official guide installs the Magisk app before flashing the image.
-    app_installed = install_magisk_app(ctx, apk)
+    app_installed = install_magisk_app(ctx, apk) if apk else False
 
     ensure_bootloader(ctx)
     slot = check_device(ctx)
@@ -1301,22 +1383,26 @@ def root(ctx: Ctx) -> None:
     ctx.fastboot("reboot", check=False)
     say("")
     if not app_installed:
-        info("waiting up to 3 minutes for the phone to boot to install the Magisk app")
+        info("waiting up to 3 minutes for the phone to boot")
         if wait_for_adb(ctx, 180):
-            app_installed = install_magisk_app(ctx, apk, launch=True)
+            if apk:
+                app_installed = install_magisk_app(ctx, apk, launch=True)
             p = ctx.adb("shell", "pidof", "magiskd", check=False)
             if (p.stdout or "").strip():
                 ok("Magisk daemon is running")
             else:
                 warn("Magisk daemon is not running; the patched boot may not be active")
         else:
-            warn("could not reach the phone over adb to install the Magisk app")
+            warn("could not reach the phone over adb")
 
     ok("root install finished.")
     if not app_installed:
-        say("   Install the Magisk app after boot:")
-        say(f"     adb install -r {apk}")
-        say(f"   or copy this APK to the phone and open it: {apk}")
+        if apk:
+            say("   Install the Magisk app after boot:")
+            say(f"     adb install -r {apk}")
+            say(f"   or copy this APK to the phone and open it: {apk}")
+        else:
+            say("   Open the Magisk app on the phone (the app that patched boot.img).")
         say("")
     say("   Then, in the Magisk app:")
     say("     1. Open Magisk.")
@@ -1451,6 +1537,9 @@ def verify(ctx: Ctx) -> None:
 
 
 def doctor(ctx: Ctx) -> None:
+    info(f"host: {ctx.system} {platform.machine()}, Python {platform.python_version()}")
+    if sys.maxsize <= 2**32:
+        die("64-bit Python is required: the installer reads whole images into memory")
     info("host tools")
     for tool in ("adb", "fastboot", "openssl"):
         if ctx.have(tool):
@@ -1459,10 +1548,20 @@ def doctor(ctx: Ctx) -> None:
             die(f"missing host tool: {tool}")
     if sys.version_info < (3, 8):
         die("Python 3.8+ required")
+    p = ctx.run(["openssl", "version"], check=False, quiet=True)
+    version = (p.stdout or p.stderr or "").strip()
+    if version:
+        info(version)
+    if ctx.system == "Darwin" and "LibreSSL" in version:
+        warn("macOS ships LibreSSL. Install OpenSSL 3 and put it on PATH:\n"
+             "  brew install openssl@3\n"
+             '  export PATH="$(brew --prefix openssl@3)/bin:$PATH"')
     if ctx.have("payload-dumper-go"):
         ok("payload-dumper-go")
     else:
         warn("payload-dumper-go missing (needed for `download`)")
+    if ctx.system == "Linux" and not ctx.have("sh"):
+        warn("sh missing (needed to patch boot.img with Magisk)")
 
     info("inputs")
     lin = ctx.lineage
@@ -1492,6 +1591,15 @@ def doctor(ctx: Ctx) -> None:
         info("key will be generated on prepare")
 
     info("root")
+    if ctx.system != "Linux":
+        info(f"native Magisk patching is Linux-only; on {ctx.system} patch boot.img in "
+             "the Magisk app and use `root --patched-boot PATH`")
+    if ctx.args.patched_boot:
+        apk = Path(ctx.args.patched_boot).expanduser()
+        if apk.is_file():
+            ok(f"patched boot image: {apk}")
+        else:
+            warn(f"patched boot image not found: {apk}")
     if ctx.args.magisk_apk:
         apk = Path(ctx.args.magisk_apk).expanduser()
         if apk.is_file():
@@ -1499,7 +1607,7 @@ def doctor(ctx: Ctx) -> None:
             ok(f"Magisk {ver} ({code})")
         else:
             warn(f"Magisk APK not found: {apk}")
-    else:
+    elif ctx.system == "Linux" and not ctx.args.patched_boot:
         info("no --magisk-apk; root downloads the latest official release")
     if not ctx.key.exists():
         warn("root needs the original key that matches avb_custom_key")
@@ -1545,6 +1653,9 @@ def main() -> None:
                     help="do not download missing images")
     ap.add_argument("--magisk-apk", default=None,
                     help="Magisk APK for root (default: download the latest release)")
+    ap.add_argument("--patched-boot", default=None,
+                    help="root: use a boot image already patched by the Magisk app "
+                         "(for Windows and macOS hosts)")
     ap.add_argument("--preinit-device", default=None,
                     help="Magisk pre-init block device "
                          f"(default: {MAGISK_PREINIT_DEFAULT})")
@@ -1560,6 +1671,10 @@ def main() -> None:
         ap.error("--no-download is not valid with the download command")
     if args.command not in ("root", "doctor") and args.magisk_apk:
         ap.error("--magisk-apk is only valid with the root or doctor command")
+    if args.command not in ("root", "doctor") and args.patched_boot:
+        ap.error("--patched-boot is only valid with the root or doctor command")
+    if args.patched_boot and args.preinit_device:
+        ap.error("--preinit-device is not valid with --patched-boot")
     if args.command != "root" and (args.preinit_device or args.patch_only):
         ap.error("--preinit-device and --patch-only are only valid with the "
                  "root command")
