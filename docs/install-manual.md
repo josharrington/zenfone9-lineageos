@@ -3,6 +3,10 @@
 This method describes the image preparation and fastboot operations without using the installer to
 flash the phone. The [script-assisted method](install-easy.md) performs these steps automatically.
 
+The commands below use a POSIX shell. On Windows, use the script-assisted method, or run the
+equivalent PowerShell commands and use Windows paths. See
+[Set up the host on Windows](setup-windows.md) for the tools and driver.
+
 ## Before you start
 
 Read the [shared safety warnings, requirements, and file layout](15-install-guide.md). This method

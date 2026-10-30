@@ -1,9 +1,10 @@
-# Set up the host
+# Set up the host on Linux
 
 These instructions use Debian or Ubuntu. On another Linux distribution, use the equivalent packages.
-macOS and WSL have not been verified.
+For macOS, see [Set up the host on macOS](setup-macos.md). For Windows, see
+[Set up the host on Windows](setup-windows.md). WSL has not been verified.
 
-Please ensure you have at least 30GB of drive space. 
+Please ensure you have at least 30GB of drive space.
 
 ## 1. Install the tools
 
@@ -49,9 +50,9 @@ From the repository root:
 python3 scripts/install_lineage_locked.py doctor
 ```
 
-`doctor` stops if `adb`, `fastboot`, or `openssl` is missing, or if Python is older than 3.8. It
-warns about missing image files and a missing `payload-dumper-go`. Check its output before you
-continue. The installer needs `payload-dumper-go` to download missing images.
+`doctor` stops if `adb`, `fastboot`, or `openssl` is missing, if Python is older than 3.8, or if
+Python is 32-bit. It warns about missing image files and a missing `payload-dumper-go`. Check its
+output before you continue. The installer needs `payload-dumper-go` to download missing images.
 
 ## Optional tools
 
