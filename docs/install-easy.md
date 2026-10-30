@@ -39,7 +39,8 @@ in [Manual installation](install-manual.md).
    winget install --id ShiningLight.OpenSSL.Light -e
    ```
 
-   Then install `payload-dumper-go` and the USB driver as described in the setup page.
+   Then install [`payload-dumper-go`](setup-windows.md#2-install-payload-dumper-go) and the USB
+   driver as described in the [Windows setup](setup-windows.md).
 
 2. Enable USB debugging on the phone, connect it, and run these from the repository root:
 

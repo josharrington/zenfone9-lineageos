@@ -31,21 +31,49 @@ on `PATH`.
 
 ## 2. Install payload-dumper-go
 
-There is no winget package. Download the latest Windows release and put it on `PATH`:
+`payload-dumper-go` extracts the partition images from the firmware and ROM `payload.bin` files. It
+has no winget package, so download the release directly. These instructions target x64 Windows; on
+ARM64, replace `windows_amd64` with `windows_arm64` in the filter below.
 
-```powershell
-$release = Invoke-RestMethod https://api.github.com/repos/ssut/payload-dumper-go/releases/latest
-$asset = $release.assets | Where-Object { $_.name -like '*windows_amd64.tar.gz' } |
-  Select-Object -First 1
-Invoke-WebRequest $asset.browser_download_url -OutFile "$env:TEMP\payload-dumper-go.tar.gz"
-tar -xzf "$env:TEMP\payload-dumper-go.tar.gz" -C "$env:TEMP"
-New-Item -ItemType Directory -Force "$env:LOCALAPPDATA\payload-dumper-go" | Out-Null
-Move-Item "$env:TEMP\payload-dumper-go.exe" "$env:LOCALAPPDATA\payload-dumper-go\" -Force
-$userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
-[Environment]::SetEnvironmentVariable('Path', "$userPath;$env:LOCALAPPDATA\payload-dumper-go", 'User')
-```
+1. Download the latest release and extract it to a per-user tools directory:
 
-Restart the terminal. `tar` is included with Windows 10 and later.
+   ```powershell
+   $release = Invoke-RestMethod https://api.github.com/repos/ssut/payload-dumper-go/releases/latest
+   $asset = $release.assets | Where-Object { $_.name -like '*windows_amd64.tar.gz' } |
+     Select-Object -First 1
+   if (-not $asset) { throw 'No Windows release asset found; open the releases page manually.' }
+
+   $dir = "$env:LOCALAPPDATA\payload-dumper-go"
+   New-Item -ItemType Directory -Force $dir | Out-Null
+   Invoke-WebRequest $asset.browser_download_url -OutFile "$env:TEMP\payload-dumper-go.tar.gz"
+   tar -xzf "$env:TEMP\payload-dumper-go.tar.gz" -C $dir
+   Unblock-File "$dir\payload-dumper-go.exe"
+   ```
+
+2. Add that directory to your user `PATH` and to the current terminal:
+
+   ```powershell
+   $dir = "$env:LOCALAPPDATA\payload-dumper-go"
+   $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+   if (($userPath -split ';') -notcontains $dir) {
+     [Environment]::SetEnvironmentVariable('Path', "$userPath;$dir", 'User')
+   }
+   $env:Path = "$env:Path;$dir"
+   ```
+
+3. Verify it starts:
+
+   ```powershell
+   where.exe payload-dumper-go
+   payload-dumper-go -h
+   ```
+
+   `where.exe` should print
+   `C:\Users\<you>\AppData\Local\payload-dumper-go\payload-dumper-go.exe`. If it does not, use the
+   full path for the check, then open a new terminal and try again.
+
+`tar` is included with Windows 10 and later. If `tar` is missing, extract the `.tar.gz` with 7-Zip
+and put `payload-dumper-go.exe` in the same directory.
 
 ## 3. Check the tools
 
@@ -109,7 +137,69 @@ output before you continue.
 Use a short work directory such as `C:\zf9`; deep paths can hit the 260-character limit. The script
 passes paths as separate arguments, so spaces in the repository path are safe.
 
-## 6. Root
+## 6. Download the images with the script
+
+`payload-dumper-go` must be on `PATH`; the script calls it for you. From the repository root:
+
+```powershell
+py -3 scripts/install_lineage_locked.py download
+```
+
+This downloads the tested ASUS firmware and LineageOS ZIPs, verifies both SHA-256 values, extracts
+`payload.bin` from each, and runs `payload-dumper-go` for the needed partitions. The images are
+written to:
+
+- `zf9\images\stock\` for the ASUS firmware
+- `zf9\images\lineage\` for LineageOS
+
+The ZIPs are deleted after extraction; `zf9\downloads\stock-payload.bin` and
+`zf9\downloads\lineage-payload.bin` are kept for retries.
+
+Useful options:
+
+| Option | Effect |
+|---|---|
+| `--stock-only` | Download only the ASUS firmware and stock images |
+| `--lineage-only` | Download only the LineageOS ROM and images |
+| `--zip-only` | Download and verify the ZIPs, but do not extract images |
+| `--keep-zip` | Keep the ZIPs after extraction |
+| `--force` | Download the ZIPs again |
+| `--no-download` | With `prepare`/`install`/`restore`, stop instead of downloading missing images |
+
+`download` is optional: `prepare`, `install`, and `restore` fetch missing image sets automatically.
+Use `--no-download` once the images exist to keep a run offline. `--zip-only` verifies the downloads
+without needing `payload-dumper-go`. See
+[Download the images](install-easy.md#download-the-images) for custom ZIP URLs and SHA-256 values.
+
+If `download` reports `payload-dumper-go is required`:
+
+```powershell
+where.exe payload-dumper-go
+py -3 scripts/install_lineage_locked.py doctor
+```
+
+`doctor` should print `ok: payload-dumper-go`. If it warns instead, the directory is not on the
+`PATH` used by this terminal; add it as shown above and open a new terminal.
+
+To repair a failed extraction manually, use the same form the script uses. For LineageOS:
+
+```powershell
+payload-dumper-go -o .\zf9\images\lineage `
+  -p boot,dtbo,vendor_boot,recovery,vbmeta_system,system,vendor,product,system_ext,odm,vendor_dlkm `
+  .\zf9\downloads\lineage-payload.bin
+```
+
+For the stock set:
+
+```powershell
+payload-dumper-go -o .\zf9\images\stock `
+  -p boot,dtbo,vendor_boot,recovery,vbmeta_system,vbmeta,system,vendor,product,system_ext,odm,vendor_dlkm `
+  .\zf9\downloads\stock-payload.bin
+```
+
+Keep the `.img` names unchanged; the script expects them. Use raw, non-sparse images.
+
+## 7. Root
 
 Native `root` patching is Linux-only: it runs a Linux `magiskboot` binary taken from the Magisk
 APK. On Windows, patch `zf9\images\lineage\boot.img` in the Magisk app on the phone, copy the patched
@@ -130,6 +220,14 @@ See [Root with Magisk](install-easy.md#root-with-magisk) for the full flow.
 - **The phone disappears after `fastboot reboot fastboot`:** fastbootd is a new USB device. Install
   the driver for it once, then rerun the command.
 - **`openssl` is not found:** add the OpenSSL `bin` directory to `PATH` as shown above.
+- **`payload-dumper-go` is not found, or the script says it is required:** run
+  `where.exe payload-dumper-go`, add `%LOCALAPPDATA%\payload-dumper-go` to `PATH` as shown above,
+  then open a new terminal and run `doctor` again.
+- **`No Windows release asset found`:** the GitHub API may be rate-limited. Open the
+  [releases page](https://github.com/ssut/payload-dumper-go/releases), download the
+  `windows_amd64.tar.gz` asset manually, and extract it to `%LOCALAPPDATA%\payload-dumper-go`.
+- **`tar` is not recognized:** extract the `.tar.gz` with 7-Zip instead, then put
+  `payload-dumper-go.exe` in `%LOCALAPPDATA%\payload-dumper-go`.
 - **Antivirus blocks the download or the patched image:** allow the repository directory and retry.
 - **USB selective suspend drops the phone:** disable it for the USB root hub in Power Options, or
   keep the phone awake during the flash.
